@@ -4,6 +4,7 @@ import { ResumeData } from './types';
 /**
  * Downloads a pristine, ATS-compliant single-column PDF of the tailored resume.
  * Designed specifically for maximum parsing accuracy in Workday, Greenhouse, Lever, and Taleo.
+ * Fully supports all standard and custom sections (Achievements, Certifications, Awards, Scholarships, Projects, etc.).
  */
 export function downloadTailoredResumePdf(resume: ResumeData): void {
   const doc = new jsPDF({
@@ -28,16 +29,41 @@ export function downloadTailoredResumePdf(resume: ResumeData): void {
   // Helper for section divider
   const renderSectionHeader = (title: string) => {
     checkPageBreak(35);
-    cursorY += 10;
+    cursorY += 8;
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(11);
-    doc.setTextColor(24, 24, 27); // Dark gray/black
+    doc.setTextColor(24, 24, 27);
     doc.text(title.toUpperCase(), margin, cursorY);
     cursorY += 4;
     doc.setDrawColor(200, 200, 205);
     doc.setLineWidth(0.75);
     doc.line(margin, cursorY, margin + contentWidth, cursorY);
-    cursorY += 14;
+    cursorY += 13;
+  };
+
+  // Helper for bullet list
+  const renderBulletsList = (bullets: string[]) => {
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9);
+    doc.setTextColor(55, 65, 81);
+
+    for (const bullet of bullets) {
+      if (!bullet || !bullet.trim()) continue;
+      checkPageBreak(18);
+      const bulletIndent = 12;
+      const textWidth = contentWidth - bulletIndent;
+      const splitLines = doc.splitTextToSize(bullet.trim(), textWidth);
+
+      doc.text('•', margin + 2, cursorY);
+
+      for (let lIdx = 0; lIdx < splitLines.length; lIdx++) {
+        if (lIdx > 0) checkPageBreak(12);
+        doc.text(splitLines[lIdx], margin + bulletIndent, cursorY);
+        cursorY += 12;
+      }
+      cursorY += 3;
+    }
+    cursorY += 3;
   };
 
   // --- 1. HEADER (Candidate Contact & Identity) ---
@@ -50,7 +76,7 @@ export function downloadTailoredResumePdf(resume: ResumeData): void {
   if (resume.title) {
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(10.5);
-    doc.setTextColor(37, 99, 235); // Clean subtle accent
+    doc.setTextColor(37, 99, 235);
     doc.text(resume.title, margin, cursorY);
     cursorY += 14;
   }
@@ -74,13 +100,13 @@ export function downloadTailoredResumePdf(resume: ResumeData): void {
   }
 
   // --- 2. PROFESSIONAL SUMMARY ---
-  if (resume.summary) {
+  if (resume.summary && resume.summary.trim()) {
     renderSectionHeader('Professional Summary');
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(9.5);
     doc.setTextColor(55, 65, 81);
 
-    const summaryLines = doc.splitTextToSize(resume.summary, contentWidth);
+    const summaryLines = doc.splitTextToSize(resume.summary.trim(), contentWidth);
     for (const line of summaryLines) {
       checkPageBreak(13);
       doc.text(line, margin, cursorY);
@@ -95,20 +121,17 @@ export function downloadTailoredResumePdf(resume: ResumeData): void {
     for (const exp of resume.experience) {
       checkPageBreak(30);
 
-      // Role and Company Line
       doc.setFont('helvetica', 'bold');
-      doc.setFontSize(10.5);
+      doc.setFontSize(10);
       doc.setTextColor(17, 24, 39);
       const roleText = `${exp.role || 'Software Engineer'}`;
       doc.text(roleText, margin, cursorY);
 
-      // Company
       const roleWidth = doc.getTextWidth(roleText);
       doc.setFont('helvetica', 'normal');
       doc.setTextColor(75, 85, 99);
       doc.text(` — ${exp.company || 'Enterprise'}`, margin + roleWidth, cursorY);
 
-      // Date aligned right
       if (exp.startDate) {
         doc.setFont('helvetica', 'bold');
         doc.setFontSize(9);
@@ -119,34 +142,42 @@ export function downloadTailoredResumePdf(resume: ResumeData): void {
       }
       cursorY += 13;
 
-      // Bullets
       if (exp.bullets && exp.bullets.length > 0) {
-        doc.setFont('helvetica', 'normal');
-        doc.setFontSize(9);
-        doc.setTextColor(55, 65, 81);
-
-        for (const bullet of exp.bullets) {
-          checkPageBreak(18);
-          const bulletIndent = 12;
-          const textWidth = contentWidth - bulletIndent;
-          const splitLines = doc.splitTextToSize(bullet, textWidth);
-
-          // Draw bullet dot
-          doc.text('•', margin + 2, cursorY);
-
-          for (let lIdx = 0; lIdx < splitLines.length; lIdx++) {
-            if (lIdx > 0) checkPageBreak(12);
-            doc.text(splitLines[lIdx], margin + bulletIndent, cursorY);
-            cursorY += 12;
-          }
-          cursorY += 3;
-        }
+        renderBulletsList(exp.bullets);
       }
-      cursorY += 6;
+      cursorY += 4;
     }
   }
 
-  // --- 4. TECHNICAL SKILLS & TOOLS ---
+  // --- 4. TECHNICAL PROJECTS ---
+  if (resume.projects && resume.projects.length > 0) {
+    renderSectionHeader('Technical Projects');
+
+    for (const proj of resume.projects) {
+      checkPageBreak(25);
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(10);
+      doc.setTextColor(17, 24, 39);
+      doc.text(proj.title || 'Technical Project', margin, cursorY);
+
+      if (proj.subtitle) {
+        const titleWidth = doc.getTextWidth(proj.title || 'Technical Project');
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(9);
+        doc.setTextColor(37, 99, 235);
+        doc.text(` | ${proj.subtitle}`, margin + titleWidth, cursorY);
+      }
+      cursorY += 13;
+
+      if (proj.bullets && proj.bullets.length > 0) {
+        renderBulletsList(proj.bullets);
+      }
+      cursorY += 4;
+    }
+  }
+
+  // --- 5. TECHNICAL SKILLS & TOOLS ---
   if (resume.skills && resume.skills.length > 0) {
     renderSectionHeader('Technical Skills & Tools');
 
@@ -178,7 +209,61 @@ export function downloadTailoredResumePdf(resume: ResumeData): void {
     }
   }
 
-  // --- 5. EDUCATION ---
+  // --- 6. KEY ACHIEVEMENTS ---
+  if (resume.achievements && resume.achievements.length > 0) {
+    renderSectionHeader('Key Achievements');
+    renderBulletsList(resume.achievements);
+  }
+
+  // --- 7. LICENSES & CERTIFICATIONS ---
+  if (resume.certifications && resume.certifications.length > 0) {
+    renderSectionHeader('Licenses & Certifications');
+    const certBullets = resume.certifications.map(c => c.year ? `${c.name} (${c.year})` : c.name);
+    renderBulletsList(certBullets);
+  }
+
+  // --- 8. SCHOLARSHIPS & FELLOWSHIPS ---
+  if (resume.scholarships && resume.scholarships.length > 0) {
+    renderSectionHeader('Academic Scholarships & Fellowships');
+    renderBulletsList(resume.scholarships);
+  }
+
+  // --- 9. HONORS & AWARDS ---
+  if (resume.awards && resume.awards.length > 0) {
+    renderSectionHeader('Honors & Awards');
+    renderBulletsList(resume.awards);
+  }
+
+  // --- 10. LEADERSHIP & EXTRACURRICULAR ---
+  if (resume.leadership && resume.leadership.length > 0) {
+    renderSectionHeader('Leadership & Extracurricular');
+    renderBulletsList(resume.leadership);
+  }
+
+  // --- 11. VOLUNTEER EXPERIENCE ---
+  if (resume.volunteer && resume.volunteer.length > 0) {
+    renderSectionHeader('Volunteer Experience');
+    renderBulletsList(resume.volunteer);
+  }
+
+  // --- 12. PUBLICATIONS & RESEARCH ---
+  if (resume.publications && resume.publications.length > 0) {
+    renderSectionHeader('Publications & Research');
+    const pubBullets = resume.publications.map(p => p.year ? `${p.title} (${p.year})` : p.title);
+    renderBulletsList(pubBullets);
+  }
+
+  // --- 13. CUSTOM SECTIONS ---
+  if (resume.customSections && resume.customSections.length > 0) {
+    for (const sec of resume.customSections) {
+      if (sec.items && sec.items.length > 0) {
+        renderSectionHeader(sec.title);
+        renderBulletsList(sec.items);
+      }
+    }
+  }
+
+  // --- 14. EDUCATION ---
   if (resume.education && resume.education.length > 0) {
     renderSectionHeader('Education');
 
@@ -216,7 +301,7 @@ export function downloadTailoredResumePdf(resume: ResumeData): void {
 
 /**
  * Print Dialog Fallback: Opens a clean browser print preview
- * with strict ATS single-column printable styling.
+ * with strict ATS single-column printable styling for all sections.
  */
 export function printTailoredResume(resume: ResumeData): void {
   const printWindow = window.open('', '_blank');
@@ -287,10 +372,22 @@ export function printTailoredResume(resume: ResumeData): void {
     ${resume.experience.map(exp => `
       <div class="job-header">
         <div><strong>${exp.role}</strong> <span class="job-company">— ${exp.company}</span></div>
-        <div class="job-date">${exp.startDate}</div>
+        <div class="job-date">${exp.startDate || ''}</div>
       </div>
       <ul>
         ${exp.bullets.map(b => `<li>${b}</li>`).join('')}
+      </ul>
+    `).join('')}
+  ` : ''}
+
+  ${resume.projects && resume.projects.length > 0 ? `
+    <div class="section-title">Technical Projects</div>
+    ${resume.projects.map(proj => `
+      <div class="job-header">
+        <div><strong>${proj.title}</strong> ${proj.subtitle ? `<span class="job-company">| ${proj.subtitle}</span>` : ''}</div>
+      </div>
+      <ul>
+        ${proj.bullets.map(b => `<li>${b}</li>`).join('')}
       </ul>
     `).join('')}
   ` : ''}
@@ -301,6 +398,64 @@ export function printTailoredResume(resume: ResumeData): void {
       <div class="skills-row">
         <span class="skills-category">${s.category}:</span> ${s.items.map(i => i.replace(/(\.js)+/gi, '.js').replace(/(\.ts)+/gi, '.ts')).join(', ')}
       </div>
+    `).join('')}
+  ` : ''}
+
+  ${resume.achievements && resume.achievements.length > 0 ? `
+    <div class="section-title">Key Achievements</div>
+    <ul>
+      ${resume.achievements.map(a => `<li>${a}</li>`).join('')}
+    </ul>
+  ` : ''}
+
+  ${resume.certifications && resume.certifications.length > 0 ? `
+    <div class="section-title">Licenses & Certifications</div>
+    <ul>
+      ${resume.certifications.map(c => `<li>${c.name} ${c.year ? `(${c.year})` : ''}</li>`).join('')}
+    </ul>
+  ` : ''}
+
+  ${resume.scholarships && resume.scholarships.length > 0 ? `
+    <div class="section-title">Academic Scholarships & Fellowships</div>
+    <ul>
+      ${resume.scholarships.map(s => `<li>${s}</li>`).join('')}
+    </ul>
+  ` : ''}
+
+  ${resume.awards && resume.awards.length > 0 ? `
+    <div class="section-title">Honors & Awards</div>
+    <ul>
+      ${resume.awards.map(aw => `<li>${aw}</li>`).join('')}
+    </ul>
+  ` : ''}
+
+  ${resume.leadership && resume.leadership.length > 0 ? `
+    <div class="section-title">Leadership & Extracurricular</div>
+    <ul>
+      ${resume.leadership.map(l => `<li>${l}</li>`).join('')}
+    </ul>
+  ` : ''}
+
+  ${resume.volunteer && resume.volunteer.length > 0 ? `
+    <div class="section-title">Volunteer Experience</div>
+    <ul>
+      ${resume.volunteer.map(v => `<li>${v}</li>`).join('')}
+    </ul>
+  ` : ''}
+
+  ${resume.publications && resume.publications.length > 0 ? `
+    <div class="section-title">Publications & Research</div>
+    <ul>
+      ${resume.publications.map(p => `<li>${p.title} ${p.year ? `(${p.year})` : ''}</li>`).join('')}
+    </ul>
+  ` : ''}
+
+  ${resume.customSections && resume.customSections.length > 0 ? `
+    ${resume.customSections.map(sec => `
+      <div class="section-title">${sec.title}</div>
+      <ul>
+        ${sec.items.map(it => `<li>${it}</li>`).join('')}
+      </ul>
     `).join('')}
   ` : ''}
 

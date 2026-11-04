@@ -48,7 +48,22 @@ import {
   CheckSquare
 } from 'lucide-react';
 import { INITIAL_RESUME } from '@/lib/utils';
-import { ResumeData, WorkExperience, TailorAuditChange, ResumeVersionType, CareerCoachChangeItem } from '@/lib/types';
+import {
+  ResumeData,
+  WorkExperience,
+  TailorAuditChange,
+  ResumeVersionType,
+  CareerCoachChangeItem,
+  CareerCoachStructuredAction,
+  CoachIntentType,
+  CustomResumeSection
+} from '@/lib/types';
+import {
+  classifyAndProcessCoachIntent,
+  SECTION_METADATA,
+  normalizeSectionKey,
+  professionallyRewriteText
+} from '@/lib/career-coach-engine';
 import { extractTextFromFile, parseRawTextToResume } from '@/lib/pdf-parser';
 import { downloadTailoredResumePdf, printTailoredResume } from '@/lib/resume-pdf-exporter';
 import {
@@ -333,6 +348,8 @@ export default function InteractiveResumeTailor({
   const [chatInput, setChatInput] = useState('');
   const [isAiGenerating, setIsAiGenerating] = useState(false);
   const [hasUnreadAiMessage, setHasUnreadAiMessage] = useState(false);
+  const [editingCoachMessageId, setEditingCoachMessageId] = useState<string | null>(null);
+  const [editingCoachContent, setEditingCoachContent] = useState<string>('');
   const [chatMessages, setChatMessages] = useState<Array<{
     id: string;
     sender: 'ai' | 'user';
@@ -347,6 +364,7 @@ export default function InteractiveResumeTailor({
       description: string;
     };
     changesApplied?: CareerCoachChangeItem[];
+    structuredAction?: CareerCoachStructuredAction;
   }>>([
     {
       id: 'welcome',
@@ -1016,9 +1034,9 @@ export default function InteractiveResumeTailor({
     );
   };
 
-  // Delete item from custom sections (scholarships, awards, achievements, leadership, volunteer, languages)
+  // Delete item from custom sections (scholarships, awards, achievements, leadership, volunteer, languages, publications)
   const handleDeleteCustomItem = (
-    secKey: 'achievements' | 'awards' | 'scholarships' | 'leadership' | 'volunteer' | 'languages' | 'unclassified',
+    secKey: 'achievements' | 'awards' | 'scholarships' | 'leadership' | 'volunteer' | 'languages' | 'publications' | 'unclassified',
     idx: number
   ) => {
     setHistory((prev) => [...prev, JSON.parse(JSON.stringify(resume))]);
@@ -1038,6 +1056,120 @@ export default function InteractiveResumeTailor({
       setAtsScore(newScore);
       if (onScoreUpdate) onScoreUpdate(newScore);
     }
+  };
+
+  // Delete entire section from canvas
+  const handleDeleteSection = (secKey: string) => {
+    setHistory((prev) => [...prev, JSON.parse(JSON.stringify(resume))]);
+    const updated = JSON.parse(JSON.stringify(resume));
+    delete (updated as any)[secKey];
+    setResume(updated);
+    setResumeVersions((prev) => ({ ...prev, editable: updated, aiBuilt: updated }));
+    if (onSaveResume) onSaveResume(updated);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('atsecure_active_resume', JSON.stringify(updated));
+    }
+    const newScore = calculateDeterministicAtsScore(updated, targetJob?.extractedKeywords || []).overallScore;
+    setAtsScore(newScore);
+    if (onScoreUpdate) onScoreUpdate(newScore);
+  };
+
+  // Delete custom section by ID
+  const handleDeleteCustomSection = (sectionId: string) => {
+    setHistory((prev) => [...prev, JSON.parse(JSON.stringify(resume))]);
+    const updated = JSON.parse(JSON.stringify(resume));
+    if (Array.isArray(updated.customSections)) {
+      updated.customSections = updated.customSections.filter((s: CustomResumeSection) => s.id !== sectionId);
+      if (updated.customSections.length === 0) delete updated.customSections;
+    }
+    setResume(updated);
+    setResumeVersions((prev) => ({ ...prev, editable: updated, aiBuilt: updated }));
+    if (onSaveResume) onSaveResume(updated);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('atsecure_active_resume', JSON.stringify(updated));
+    }
+    const newScore = calculateDeterministicAtsScore(updated, targetJob?.extractedKeywords || []).overallScore;
+    setAtsScore(newScore);
+    if (onScoreUpdate) onScoreUpdate(newScore);
+  };
+
+  // Delete item from custom section
+  const handleDeleteCustomSectionItem = (sectionId: string, idx: number) => {
+    setHistory((prev) => [...prev, JSON.parse(JSON.stringify(resume))]);
+    const updated = JSON.parse(JSON.stringify(resume));
+    if (Array.isArray(updated.customSections)) {
+      const targetSec = updated.customSections.find((s: CustomResumeSection) => s.id === sectionId);
+      if (targetSec && Array.isArray(targetSec.items)) {
+        targetSec.items.splice(idx, 1);
+      }
+    }
+    setResume(updated);
+    setResumeVersions((prev) => ({ ...prev, editable: updated }));
+    if (onSaveResume) onSaveResume(updated);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('atsecure_active_resume', JSON.stringify(updated));
+    }
+    const newScore = calculateDeterministicAtsScore(updated, targetJob?.extractedKeywords || []).overallScore;
+    setAtsScore(newScore);
+    if (onScoreUpdate) onScoreUpdate(newScore);
+  };
+
+  // Save edited content from Career Coach message card
+  const handleSaveEditedCoachContent = (msgId: string, action: CareerCoachStructuredAction) => {
+    if (!editingCoachContent.trim()) return;
+    const newContent = enforceCanonicalCasing(editingCoachContent.trim());
+    setHistory((prev) => [...prev, JSON.parse(JSON.stringify(resume))]);
+    const updated = JSON.parse(JSON.stringify(resume));
+    const secKey = action.targetSection;
+
+    if (secKey === 'summary') {
+      updated.summary = newContent;
+    } else if (secKey === 'achievements' && Array.isArray(updated.achievements)) {
+      const idx = updated.achievements.indexOf(action.suggestedContent);
+      if (idx !== -1) updated.achievements[idx] = newContent;
+      else updated.achievements.push(newContent);
+    } else if (secKey === 'scholarships' && Array.isArray(updated.scholarships)) {
+      const idx = updated.scholarships.indexOf(action.suggestedContent);
+      if (idx !== -1) updated.scholarships[idx] = newContent;
+      else updated.scholarships.push(newContent);
+    } else if (secKey === 'awards' && Array.isArray(updated.awards)) {
+      const idx = updated.awards.indexOf(action.suggestedContent);
+      if (idx !== -1) updated.awards[idx] = newContent;
+      else updated.awards.push(newContent);
+    } else if (secKey === 'certifications' && Array.isArray(updated.certifications)) {
+      const cert = updated.certifications.find((c: any) => c.name === action.suggestedContent);
+      if (cert) cert.name = newContent;
+      else updated.certifications.push({ id: `cert_${Date.now()}`, name: newContent });
+    } else if (secKey === 'projects' && Array.isArray(updated.projects) && updated.projects[0]) {
+      updated.projects[0].bullets[0] = newContent;
+    } else if (secKey === 'experience' && Array.isArray(updated.experience) && updated.experience[0]) {
+      updated.experience[0].bullets[0] = newContent;
+    }
+
+    setResume(updated);
+    setResumeVersions((prev) => ({ ...prev, editable: updated, aiBuilt: updated }));
+    if (onSaveResume) onSaveResume(updated);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('atsecure_active_resume', JSON.stringify(updated));
+    }
+
+    const newScore = calculateDeterministicAtsScore(updated, targetJob?.extractedKeywords || []).overallScore;
+    setAtsScore(newScore);
+    if (onScoreUpdate) onScoreUpdate(newScore);
+
+    setChatMessages((prev) =>
+      prev.map((m) =>
+        m.id === msgId
+          ? {
+              ...m,
+              structuredAction: m.structuredAction
+                ? { ...m.structuredAction, suggestedContent: newContent }
+                : undefined
+            }
+          : m
+      )
+    );
+    setEditingCoachMessageId(null);
   };
 
   // Generate suggestions for word/bullet and auto-apply if enabled
@@ -1551,6 +1683,255 @@ export default function InteractiveResumeTailor({
     });
   };
 
+  // Helper to execute structured Career Coach actions onto ResumeData canvas
+  const applyCoachStructuredAction = (
+    updated: ResumeData,
+    structured: CareerCoachStructuredAction,
+    target?: SelectedTarget | null
+  ) => {
+    const targetSec = structured.targetSection;
+    const content = structured.suggestedContent;
+
+    switch (structured.intent) {
+      case 'ADD_SECTION': {
+        if (targetSec === 'achievements') {
+          if (!updated.achievements) updated.achievements = [];
+          if (content && !updated.achievements.includes(content)) updated.achievements.push(content);
+        } else if (targetSec === 'certifications') {
+          if (!updated.certifications) updated.certifications = [];
+          if (content) {
+            const already = updated.certifications.some((c: any) => c.name.toLowerCase() === content.toLowerCase());
+            if (!already) {
+              updated.certifications.push({
+                id: `cert_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                name: content,
+                year: new Date().getFullYear().toString()
+              });
+            }
+          }
+        } else if (targetSec === 'scholarships') {
+          if (!updated.scholarships) updated.scholarships = [];
+          if (content && !updated.scholarships.includes(content)) updated.scholarships.push(content);
+        } else if (targetSec === 'awards') {
+          if (!updated.awards) updated.awards = [];
+          if (content && !updated.awards.includes(content)) updated.awards.push(content);
+        } else if (targetSec === 'leadership') {
+          if (!updated.leadership) updated.leadership = [];
+          if (content && !updated.leadership.includes(content)) updated.leadership.push(content);
+        } else if (targetSec === 'volunteer') {
+          if (!updated.volunteer) updated.volunteer = [];
+          if (content && !updated.volunteer.includes(content)) updated.volunteer.push(content);
+        } else if (targetSec === 'publications') {
+          if (!updated.publications) updated.publications = [];
+          if (content) {
+            const already = updated.publications.some((p: any) => p.title.toLowerCase() === content.toLowerCase());
+            if (!already) {
+              updated.publications.push({
+                id: `pub_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                title: content,
+                year: new Date().getFullYear().toString()
+              });
+            }
+          }
+        } else if (targetSec === 'projects') {
+          if (!updated.projects) updated.projects = [];
+          if (content) {
+            updated.projects.push({
+              id: `proj_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+              title: structured.title || 'Technical Project',
+              subtitle: structured.data?.subtitle || 'Web & Cloud Technologies',
+              bullets: [content]
+            });
+          }
+        } else {
+          // Custom Section (e.g. "extracurricular", "patents", "speaking", etc.)
+          if (!updated.customSections) updated.customSections = [];
+          const existing = updated.customSections.find(c => c.title.toLowerCase() === structured.sectionTitle.toLowerCase());
+          if (existing) {
+            if (content && !existing.items.includes(content)) existing.items.push(content);
+          } else {
+            updated.customSections.push({
+              id: `cust_${Date.now()}`,
+              title: structured.sectionTitle,
+              items: content ? [content] : []
+            });
+          }
+        }
+        break;
+      }
+
+      case 'ADD_ACHIEVEMENT': {
+        if (targetSec === 'scholarships') {
+          updated.scholarships = [...(updated.scholarships || []), content];
+        } else if (targetSec === 'awards') {
+          updated.awards = [...(updated.awards || []), content];
+        } else {
+          updated.achievements = [...(updated.achievements || []), content];
+        }
+        break;
+      }
+
+      case 'ADD_SKILL': {
+        if (!updated.skills || updated.skills.length === 0) {
+          updated.skills = [{ category: 'Technical Skills', items: [] }];
+        }
+        const skillsToAdd: string[] = structured.data?.skillsToAdd || [content];
+        for (const raw of skillsToAdd) {
+          const canon = enforceCanonicalCasing(raw.trim());
+          const already = updated.skills.some((cat: any) => cat.items.some((it: string) => it.toLowerCase() === canon.toLowerCase()));
+          if (!already && canon) {
+            updated.skills[0].items.push(canon);
+          }
+        }
+        break;
+      }
+
+      case 'REMOVE_SKILL': {
+        const skillsToRemove: string[] = structured.data?.skillsToRemove || [content];
+        if (updated.skills) {
+          updated.skills.forEach((cat: any) => {
+            cat.items = cat.items.filter((item: string) => !skillsToRemove.some((rem: string) => rem.toLowerCase() === item.toLowerCase()));
+          });
+        }
+        break;
+      }
+
+      case 'UPDATE_SKILL': {
+        if (updated.skills && structured.data?.oldSkill && structured.data?.newSkill) {
+          const oldS = structured.data.oldSkill.toLowerCase();
+          const newS = enforceCanonicalCasing(structured.data.newSkill);
+          updated.skills.forEach((cat: any) => {
+            cat.items = cat.items.map((it: string) => it.toLowerCase() === oldS ? newS : it);
+          });
+        }
+        break;
+      }
+
+      case 'ADD_PROJECT': {
+        if (!updated.projects) updated.projects = [];
+        updated.projects.push({
+          id: `proj_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          title: structured.title || 'Technical Project',
+          subtitle: structured.data?.subtitle || 'React.js, Node.js, Web Technologies',
+          bullets: [content]
+        });
+        break;
+      }
+
+      case 'UPDATE_PROJECT': {
+        if (updated.projects && updated.projects.length > 0) {
+          const pIdx = (target?.section === 'projects' && target.expIndex !== undefined) ? target.expIndex : 0;
+          if (updated.projects[pIdx]) {
+            const bIdx = (target?.section === 'projects' && target.bulletIndex !== undefined) ? target.bulletIndex : 0;
+            if (updated.projects[pIdx].bullets && updated.projects[pIdx].bullets[bIdx] !== undefined) {
+              updated.projects[pIdx].bullets[bIdx] = content;
+            } else {
+              updated.projects[pIdx].bullets = [content];
+            }
+          }
+        } else {
+          updated.projects = [{
+            id: `proj_${Date.now()}`,
+            title: structured.title || 'Technical Project',
+            subtitle: 'Web Technologies',
+            bullets: [content]
+          }];
+        }
+        break;
+      }
+
+      case 'ADD_EXPERIENCE': {
+        if (structured.data?.role && structured.data?.company) {
+          updated.experience = [
+            ...(updated.experience || []),
+            {
+              id: `exp_${Date.now()}`,
+              role: structured.data.role,
+              company: structured.data.company,
+              startDate: structured.data.startDate || 'Recent',
+              endDate: structured.data.endDate || 'Present',
+              bullets: structured.data.bullets || [content]
+            }
+          ];
+        } else if (updated.experience && updated.experience[0]) {
+          updated.experience[0].bullets.push(content);
+        } else {
+          updated.experience = [{
+            id: `exp_${Date.now()}`,
+            role: 'Software Engineer',
+            company: 'Technology Organization',
+            startDate: 'Recent',
+            endDate: 'Present',
+            bullets: [content]
+          }];
+        }
+        break;
+      }
+
+      case 'UPDATE_EXPERIENCE': {
+        if (updated.experience && updated.experience[0]) {
+          const eIdx = (target?.section === 'experience' && target.expIndex !== undefined) ? target.expIndex : 0;
+          const bIdx = (target?.section === 'experience' && target.bulletIndex !== undefined) ? target.bulletIndex : 0;
+          if (updated.experience[eIdx]?.bullets) {
+            updated.experience[eIdx].bullets[bIdx] = content;
+          }
+        }
+        break;
+      }
+
+      case 'UPDATE_SUMMARY': {
+        updated.summary = content;
+        break;
+      }
+
+      case 'UPDATE_EDUCATION': {
+        if (updated.education && updated.education[0] && content) {
+          if (structured.data?.degree) updated.education[0].degree = structured.data.degree;
+          if (structured.data?.institution) updated.education[0].institution = structured.data.institution;
+        }
+        break;
+      }
+
+      case 'REWRITE_CONTENT':
+      case 'IMPROVE_GRAMMAR':
+      case 'IMPROVE_RESUME_BULLET': {
+        if (target && target.contextSentence) {
+          if (target.section === 'summary') {
+            updated.summary = content;
+          } else if (target.section === 'experience' && target.expIndex !== undefined && target.bulletIndex !== undefined) {
+            if (updated.experience?.[target.expIndex]?.bullets) {
+              updated.experience[target.expIndex].bullets[target.bulletIndex] = content;
+            }
+          } else if (target.section === 'projects' && target.expIndex !== undefined && target.bulletIndex !== undefined) {
+            if (updated.projects?.[target.expIndex]?.bullets) {
+              updated.projects[target.expIndex].bullets[target.bulletIndex] = content;
+            }
+          } else if (target.section === 'achievements' && target.bulletIndex !== undefined && updated.achievements) {
+            updated.achievements[target.bulletIndex] = content;
+          } else if (target.section === 'scholarships' && target.bulletIndex !== undefined && updated.scholarships) {
+            updated.scholarships[target.bulletIndex] = content;
+          }
+        } else {
+          if (updated.experience?.[0]?.bullets?.[0]) {
+            updated.experience[0].bullets[0] = content;
+          }
+        }
+        break;
+      }
+
+      case 'DELETE_SECTION': {
+        delete (updated as any)[targetSec];
+        if (updated.customSections) {
+          updated.customSections = updated.customSections.filter(c => c.title.toLowerCase() !== structured.sectionTitle.toLowerCase());
+        }
+        break;
+      }
+
+      default:
+        break;
+    }
+  };
+
   // Send custom prompt to AI Chatbot with Intelligent Intent Recognition & Dynamic Tailoring
   const handleSendCustomPrompt = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -1633,61 +2014,14 @@ export default function InteractiveResumeTailor({
         }
       }
 
-      // 3. DIRECT ACTION: Add / Inject Skills or Keywords into Resume
-      const skillMatch = userText.match(/(?:add|inject|include|insert|put)\s+(?:skills?|technolog(?:y|ies)|keywords?)\s*[:]\s*(.+)/i) ||
-                         userText.match(/(?:add|inject|include|insert|put)\s+(.+?)\s+(?:to|in|into)\s+(?:my\s+)?(?:skills?|resume|technical\s+skills|tech)/i) ||
-                         userText.match(/(?:add|inject|include|insert)\s+(?:skill|keyword|technology|tech)\s+(.+)/i) ||
-                         userText.match(/^add\s+([A-Za-z0-9#+.\s,-]+)$/i);
-      if (skillMatch) {
-        const rawSkills = skillMatch[1].split(/[,+&]|\band\b/i).map(s => s.trim().replace(/^["']|["']$/g, '')).filter(Boolean);
-        if (rawSkills.length > 0) {
-          setHistory((prev) => [...prev, JSON.parse(JSON.stringify(resume))]);
-          setRedoStack([]);
-
-          const updated = JSON.parse(JSON.stringify(resume));
-          const injected: string[] = [];
-
-          if (!updated.skills || updated.skills.length === 0) {
-            updated.skills = [{ category: 'Technical Skills', items: [] }];
-          }
-
-          const targetCategory = updated.skills[0];
-          rawSkills.forEach((raw) => {
-            const canon = enforceCanonicalCasing(raw);
-            const already = updated.skills.some((cat: any) => cat.items.some((item: string) => item.toLowerCase() === canon.toLowerCase()));
-            if (!already) {
-              targetCategory.items.push(canon);
-              injected.push(canon);
-            }
-          });
-
-          setResume(updated);
-          if (onSaveResume) onSaveResume(updated);
-          if (typeof window !== 'undefined') {
-            localStorage.setItem('atsecure_active_resume', JSON.stringify(updated));
-          }
-
-          const newScore = calculateDeterministicAtsScore(updated, targetJob?.extractedKeywords || []).overallScore;
-          setAtsScore(newScore);
-          if (onScoreUpdate) onScoreUpdate(newScore);
-
-          setChatMessages((prev) => [
-            ...prev,
-            {
-              id: `ai_skill_${Date.now()}`,
-              sender: 'ai',
-              text: injected.length > 0
-                ? `🎯 Recognized Intent: Add Skills (${injected.join(', ')})\n\n✓ Injected ${injected.length} new skill${injected.length > 1 ? 's' : ''} into your Skills section: **${injected.join(', ')}**!\n\n📈 ATS Score upgraded to ${newScore}% (+${Math.max(2, injected.length * 2)} pts).`
-                : `ℹ️ The requested skill(s) are already present in your skills list.`,
-              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-            }
-          ]);
-          setIsAiGenerating(false);
-          return;
-        }
+      // 3. SPECIAL ACTION: Scan all weak bullets
+      if (lower.includes('scan') && (lower.includes('weak') || lower.includes('all bullets') || lower.includes('analyze all'))) {
+        handleScanAllBullets();
+        setIsAiGenerating(false);
+        return;
       }
 
-      // 3.5 DIRECT ACTION: Incorporate Keyword into Bullet (e.g. "incorporate Docker into bullet 1")
+      // 3.5 Keyword Incorporation into Specific Bullet (e.g. "incorporate Docker into bullet 1")
       const bulletKwMatch = userText.match(/(?:incorporate|inject|add|include|use)\s+(.+?)\s+(?:in|into|to)\s+(?:bullet\s*#?(\d+)|selected\s+bullet|my\s+bullet)/i);
       if (bulletKwMatch) {
         const rawKw = bulletKwMatch[1].replace(/["']/g, '').trim();
@@ -1708,39 +2042,9 @@ export default function InteractiveResumeTailor({
           contextSentence: targetBullet
         };
         setSelectedTarget(targetToUse);
-        await generateSuggestionsForWord(rawKw, targetBullet, 'experience', 0, targetBIdx, targetToUse, [rawKw]);
-        setIsAiGenerating(false);
-        return;
       }
 
-      // 4. Check if user is asking to scan all bullets
-      if (lower.includes('scan') || lower.includes('weak') || lower.includes('analyze all') || lower.includes('all bullets')) {
-        handleScanAllBullets();
-        setIsAiGenerating(false);
-        return;
-      }
-
-      // 5. Diagnostic / Coaching Inquiry
-      const isAtsQuestion = /\b(what is my score|how is my resume|how to improve|ats score|my rating|give feedback|review my resume|diagnos)\b/i.test(userText);
-      if (isAtsQuestion) {
-        const totalBullets = resume.experience.reduce((acc, e) => acc + e.bullets.length, 0);
-        const totalSkills = resume.skills.reduce((acc, s) => acc + s.items.length, 0);
-        const missingCount = missingKeywords.length;
-
-        setChatMessages((prev) => [
-          ...prev,
-          {
-            id: `ai_diag_${Date.now()}`,
-            sender: 'ai',
-            text: `📊 **Active Resume Diagnostic Assessment:**\n\n• **Overall ATS Score:** ${atsScore}/100\n• **Candidate Role:** ${targetRoleTitle || resume.title || 'Software Engineer'}\n• **Total Experience Bullets:** ${totalBullets}\n• **Total Skills Count:** ${totalSkills}\n• **Missing Target Keywords:** ${missingCount} (${missingKeywords.slice(0, 5).join(', ') || 'All matched'})\n\n💡 **Actionable Improvements:**\n1. Type \`add skill Docker, AWS\` to immediately inject high-demand cloud keywords.\n2. Say \`make bullet 1 shorter\` or click any sentence on the left to tailor it with the Google XYZ formula.\n3. Type \`rewrite summary\` to tailor your professional profile pitch.`,
-            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-          }
-        ]);
-        setIsAiGenerating(false);
-        return;
-      }
-
-      // 6. Context Switching: Check if user specifies a particular bullet
+      // Context Switching: Check if user specifies a particular bullet
       let targetBulletIdx: number | null = null;
       if (/\bbullet\s*#?1\b|\bfirst\s+bullet\b/i.test(userText)) targetBulletIdx = 0;
       else if (/\bbullet\s*#?2\b|\bsecond\s+bullet\b/i.test(userText)) targetBulletIdx = 1;
@@ -1761,415 +2065,152 @@ export default function InteractiveResumeTailor({
         });
       }
 
-      // 7. Check if user is asking to rewrite summary
-      if (lower.includes('summary') || lower.includes('bio') || lower.includes('about me')) {
-        setSelectedTarget({
-          section: 'summary',
-          word: 'summary',
-          contextSentence: resume.summary
-        });
+      // 4. UNIFIED INTELLIGENT CAREER COACH & RESUME EDITING PIPELINE
+      const geminiKey = getClientGeminiApiKey();
 
-        // Call backend or local NLP to shape summary with user's instructions
-        const geminiKey = getClientGeminiApiKey();
-        const res = await fetch('/api/tailor-bullet', {
+      // Run high-precision deterministic intent classifier and grammar repair engine first
+      let structuredAction: CareerCoachStructuredAction = classifyAndProcessCoachIntent(
+        userText,
+        resume,
+        targetJob,
+        selectedTarget ? { contextSentence: selectedTarget.contextSentence, section: selectedTarget.section as any } : undefined
+      );
+
+      let chatResponseText = '';
+      let apiItems: CareerCoachChangeItem[] = [];
+
+      try {
+        const coachRes = await fetch('/api/career-coach', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             ...(geminiKey ? { 'x-gemini-api-key': geminiKey } : {})
           },
           body: JSON.stringify({
-            original_bullet: resume.summary,
-            instructions: userText,
-            job_description: targetJob?.description || '',
-            target_role: targetRoleTitle || targetJob?.title || '',
-            keywords: missingKeywords.slice(0, 5),
-            section: 'summary',
-            seniority: seniorityLevel,
-            geminiApiKey: geminiKey,
-            candidate_context: resume
+            message: userText,
+            resume,
+            targetJob,
+            selectedBullet: selectedTarget?.contextSentence
           })
         });
 
-        let summaryVariants: any[] = [];
-        if (res.ok) {
-          const data = await res.json();
-          if (data.variants && data.variants.length > 0) {
-            summaryVariants = data.variants;
+        if (coachRes.ok) {
+          const coachData = await coachRes.json();
+          if (coachData.structuredAction) {
+            structuredAction = coachData.structuredAction;
+          }
+          if (coachData.chatResponse) {
+            chatResponseText = coachData.chatResponse;
+          }
+          if (Array.isArray(coachData.items)) {
+            apiItems = coachData.items;
           }
         }
+      } catch (coachErr) {
+        console.warn('Career coach API fetch error, utilizing deterministic local engine:', coachErr);
+      }
 
-        const isIntern = seniorityLevel === 'intern';
-        const roleLabel = targetRoleTitle || targetJob?.title || (isIntern ? 'Software Engineering Intern' : 'Full Stack Engineer');
-
-        const fallbackSummary = isIntern
-          ? enforceCanonicalCasing(`Proactive and results-driven ${roleLabel} candidate with solid technical proficiency in React.js, Node.js, and modern full-stack development. Demonstrated ability building reliable applications, writing clean code, and integrating performant REST APIs.`)
-          : enforceCanonicalCasing(`Results-oriented ${roleLabel} with proven track record delivering scalable web applications, optimizing backend architectures, and driving technical velocity using React.js, Node.js, and cloud containerization.`);
-
-        const suggestions: TailorSuggestion[] = summaryVariants.length > 0
-          ? summaryVariants.map((v, idx) => ({
-              id: `sug_sum_${Date.now()}_${idx}`,
-              type: 'google_xyz',
-              title: v.label || `Professional Summary Option #${idx + 1}`,
-              approach: v.approach || (idx === 0 ? 'Professional' : idx === 1 ? 'Achievement-Focused' : 'ATS-Optimized'),
-              originalSentence: resume.summary,
-              replacementText: v.text,
-              replacementSentence: v.text,
-              atsGain: v.atsGain || 8,
-              wordCount: v.wordCount || (v.text ? v.text.split(/\s+/).length : 0),
-              explanation: v.explanation || '',
-              keywordsUsed: v.keywordsUsed || [],
-              improvements: v.improvements || [],
-              needsUserInput: v.needsUserInput || false,
-              placeholders: v.placeholders || []
-            }))
-          : [
-              {
-                id: `sug_sum_${Date.now()}`,
-                type: 'google_xyz',
-                title: `${isIntern ? 'Intern / Fresher' : 'Professional'} Summary`,
-                approach: 'Professional',
-                originalSentence: resume.summary,
-                replacementText: fallbackSummary,
-                replacementSentence: fallbackSummary,
-                atsGain: 6,
-                wordCount: fallbackSummary.split(/\s+/).length,
-                explanation: 'Synthesizes your technical proficiency and career aspirations in a concise paragraph.',
-                keywordsUsed: ['React.js', 'Node.js', 'REST APIs'],
-                improvements: ['Tailored to target engineering level', 'Clear recruiter-focused pitch'],
-                needsUserInput: false,
-                placeholders: []
-              }
-            ];
-
-        const topSug = suggestions[0];
-        let newScore = atsScore;
-        if (autoApply && topSug) {
-          const resApply = applySentenceToTarget(topSug.replacementSentence, { section: 'summary', word: 'summary', contextSentence: resume.summary }, topSug.atsGain, topSug.title);
-          newScore = resApply.newScore;
+      // If API did not format message, provide standardized confirmation schema:
+      if (!chatResponseText) {
+        if (structuredAction.intent === 'GENERAL_RESUME_QUERY') {
+          chatResponseText = `📊 **Active Resume Diagnostic Assessment:**\n\n• **Overall ATS Score:** ${atsScore}/100\n• **Candidate Role:** ${targetRoleTitle || resume.title || 'Software Engineering Professional'}\n• **Total Experience Bullets:** ${(resume.experience || []).reduce((acc, e) => acc + (e.bullets?.length || 0), 0)}\n• **Total Skills Count:** ${(resume.skills || []).reduce((acc, s) => acc + (s.items?.length || 0), 0)}\n\n💡 **Actionable Improvements:**\n1. Add accomplishments like *"got scholarships across 200000+ candidates"* or *"won hackathon and worked with team"*.\n2. Add certifications like *"add certifications section and AWS certification"*.\n3. Add technical skills like *"add Python and Java to skills"* or *"remove HTML from my skills"*.\n4. Click any bullet on the canvas to tailor it with Google XYZ formula!`;
+        } else {
+          chatResponseText = `🎯 **Recognized Intent:** ${structuredAction.intent.replace(/_/g, ' ')}\n\n` +
+            `📁 **Target Section:** ${structuredAction.sectionTitle}\n\n` +
+            (structuredAction.suggestedContent ? `📝 **Suggested Content:**\n"${structuredAction.suggestedContent}"\n\n` : '') +
+            `⚡ **Action Performed:** ${structuredAction.actionPerformedMessage}\n\n` +
+            `📈 **ATS Score Upgraded:** ${structuredAction.scoreIncreaseString}`;
         }
+      }
 
+      // If user asks a general diagnostic query, don't mutate canvas:
+      if (structuredAction.intent === 'GENERAL_RESUME_QUERY') {
         setChatMessages((prev) => [
           ...prev,
           {
-            id: `ai_${Date.now()}`,
+            id: `ai_diag_${Date.now()}`,
             sender: 'ai',
-            text: autoApply
-              ? `⚡ Auto-Applied Summary to Resume Canvas!\n\nLive in Resume: "${topSug.replacementSentence}"\n\n📈 ATS Score upgraded to ${newScore} (+${topSug.atsGain} pts).`
-              : `🎯 Recognized Intent: Tailor Summary based on "${userText}"\n\nHere are tailored options aligned with your candidate level (${seniorityLevel.toUpperCase()}):`,
+            text: chatResponseText,
             timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            suggestions
+            structuredAction
           }
         ]);
         setIsAiGenerating(false);
         return;
       }
 
-      // 7.5 Conversational Content Addition & Career Coach Recognition
-      const isBulletRewriteCommand = /^(?:make\s+(?:it\s+)?(?:shorter|longer|more|better)|rewrite|shorten|expand|rephrase|improve\s+this|fix\s+grammar|use\s+google\s+xyz|add\s+metrics\s+to\s+this)/i.test(userText.trim()) ||
-                                     userText.trim().toLowerCase().startsWith('upgrade:');
+      // Apply the structured action to the live resume canvas
+      const prevSnapshot = JSON.parse(JSON.stringify(resume));
+      setHistory((prev) => [...prev, prevSnapshot]);
+      setRedoStack([]);
 
-      const grammarCheck = autoCorrectGrammarAndSpelling(userText);
-      const isContentAddition = !isBulletRewriteCommand && (
-        grammarCheck.isAchievementOrHackathon ||
-        /\b(participated|participate|particated|participted|won|awarded|scholarship|scholarships|fellowship|grant|hackathon|hackathons|hackthon|contest|competition|certif|credential|intern|internship|built|developed|created|architected|project|app|website|lead|organizer|club|volunteer|published|paper|patent|adobe|be10x|events?)\b/i.test(userText) ||
-        /\b(\d+[\+]?\s+(?:applicants|users|attendees|participants|teams))\b/i.test(userText) ||
-        userText.split(/\s+/).length >= 4
-      );
+      const updated: ResumeData = JSON.parse(JSON.stringify(resume));
+      updated.versionType = 'AI_BUILT';
 
-      if (isContentAddition) {
-        const geminiKey = getClientGeminiApiKey();
-        let coachData: any = null;
+      applyCoachStructuredAction(updated, structuredAction, selectedTarget);
 
-        try {
-          const coachRes = await fetch('/api/career-coach', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              ...(geminiKey ? { 'x-gemini-api-key': geminiKey } : {})
-            },
-            body: JSON.stringify({
-              message: userText,
-              resume,
-              targetJob,
-              selectedBullet: selectedTarget?.contextSentence
-            })
-          });
-
-          if (coachRes.ok) {
-            coachData = await coachRes.json();
-          }
-        } catch (fetchErr) {
-          console.warn('Career coach API error, utilizing local grammar pipeline:', fetchErr);
-        }
-
-        // Guaranteed local fallback if API response is empty or failed
-        if (!coachData || !Array.isArray(coachData.items) || coachData.items.length === 0) {
-          coachData = {
-            intent: 'ADD_NEW_CONTENT',
-            summary: grammarCheck.categoryTitle,
-            chatResponse: `🎯 **Recognized Intent: Add to ${grammarCheck.categoryTitle}**\n\n• **Grammar-Corrected Input:** "${grammarCheck.correctedText}"\n• **Optimized Resume Entry:** "${grammarCheck.formattedResumeBullet}"\n\n✓ **Automatically applied and perfectly fitted into your ${grammarCheck.categoryTitle} section!**\n\n📈 Current ATS Score: ${Math.min(100, atsScore + 6)}% (+6 pts)`,
-            items: [
-              {
-                id: `item_local_${Date.now()}`,
-                section: grammarCheck.detectedSection,
-                action: 'add',
-                title: grammarCheck.categoryTitle,
-                appliedText: grammarCheck.formattedResumeBullet,
-                explanation: 'Automatically recognized and formatted into high-impact ATS bullet.',
-                ats_score_increase: '+6 pts',
-                score_delta_value: 6
-              }
-            ]
-          };
-        }
-
-        if ((coachData.intent === 'ADD_NEW_CONTENT' || coachData.intent === 'UPDATE_EXISTING_CONTENT') && Array.isArray(coachData.items) && coachData.items.length > 0) {
-          const prevSnapshot = JSON.parse(JSON.stringify(resume));
-          setHistory((prev) => [...prev, prevSnapshot]);
-          setRedoStack([]);
-
-          const updated = JSON.parse(JSON.stringify(resume));
-          updated.versionType = 'AI_BUILT';
-
-            for (const it of coachData.items) {
-              if (it.section === 'scholarships') {
-                updated.scholarships = [...(updated.scholarships || []), it.appliedText];
-              } else if (it.section === 'awards') {
-                updated.awards = [...(updated.awards || []), it.appliedText];
-              } else if (it.section === 'achievements') {
-                updated.achievements = [...(updated.achievements || []), it.appliedText];
-              } else if (it.section === 'certifications') {
-                updated.certifications = [
-                  ...(updated.certifications || []),
-                  { id: `cert_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`, name: it.appliedText }
-                ];
-              } else if (it.section === 'projects') {
-                updated.projects = [
-                  ...(updated.projects || []),
-                  {
-                    id: `proj_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-                    title: it.title || 'Technical Project',
-                    subtitle: it.data?.subtitle || '',
-                    bullets: [it.appliedText]
-                  }
-                ];
-              } else if (it.section === 'experience') {
-                if (it.data?.role && it.data?.company) {
-                  updated.experience = [
-                    ...(updated.experience || []),
-                    {
-                      id: `exp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-                      role: it.data.role,
-                      company: it.data.company,
-                      startDate: it.data.startDate || 'Recent',
-                      endDate: it.data.endDate || 'Present',
-                      bullets: it.data.bullets || [it.appliedText]
-                    }
-                  ];
-                } else if (updated.experience && updated.experience[0]) {
-                  updated.experience[0].bullets.push(it.appliedText);
-                } else {
-                  updated.experience = [
-                    {
-                      id: `exp_${Date.now()}`,
-                      role: 'Software Engineer',
-                      company: 'Organization',
-                      startDate: 'Recent',
-                      endDate: 'Present',
-                      bullets: [it.appliedText]
-                    }
-                  ];
-                }
-              } else if (it.section === 'skills') {
-                if (!updated.skills || updated.skills.length === 0) {
-                  updated.skills = [{ category: 'Technical Skills', items: [] }];
-                }
-                const skillsToAdd = it.data?.items || [it.appliedText];
-                for (const sk of skillsToAdd) {
-                  if (!updated.skills[0].items.some((item: string) => item.toLowerCase() === sk.toLowerCase())) {
-                    updated.skills[0].items.push(sk);
-                  }
-                }
-              } else if (it.section === 'leadership') {
-                updated.leadership = [...(updated.leadership || []), it.appliedText];
-              } else if (it.section === 'volunteer') {
-                updated.volunteer = [...(updated.volunteer || []), it.appliedText];
-              } else if (it.section === 'languages') {
-                updated.languages = [...(updated.languages || []), it.appliedText];
-              } else {
-                updated.achievements = [...(updated.achievements || []), it.appliedText];
-              }
-            }
-
-            setResume(updated);
-            setResumeVersions((prev) => ({ ...prev, aiBuilt: updated, editable: updated }));
-            setActiveVersionType('AI_BUILT');
-            if (onSaveResume) onSaveResume(updated);
-            if (typeof window !== 'undefined') {
-              localStorage.setItem('atsecure_active_resume', JSON.stringify(updated));
-            }
-
-            const prevScore = atsScore;
-            const newBreakdown = calculateDeterministicAtsScore(updated, targetJob?.extractedKeywords || []);
-            const scoreDelta = coachData.items[0]?.score_delta_value || 6;
-            const newScore = Math.min(98, Math.max(prevScore + scoreDelta, newBreakdown.overallScore));
-            updated.ats_score = newScore;
-            setAtsScore(newScore);
-            if (onScoreUpdate) onScoreUpdate(newScore);
-
-            const firstSec = coachData.items[0]?.section || 'achievements';
-            setFlashingSection(firstSec);
-            setTimeout(() => setFlashingSection(null), 3500);
-
-            setChatMessages((prev) => [
-              ...prev,
-              {
-                id: `coach_${Date.now()}`,
-                sender: 'ai',
-                text: coachData.chatResponse,
-                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                canUndo: true,
-                undoData: {
-                  previousResume: prevSnapshot,
-                  description: coachData.summary
-                },
-                changesApplied: coachData.items
-              }
-            ]);
-            setIsAiGenerating(false);
-            return;
-          }
-        }
-
-      // 8. Regular bullet tailoring request (shaped by user's chat prompt)
-      const currentTarget = selectedTarget || {
-        section: 'experience' as const,
-        expIndex: 0,
-        bulletIndex: 0,
-        word: 'experience',
-        contextSentence: resume.experience[0]?.bullets[0] || ''
-      };
-      const activeBullet = currentTarget.contextSentence || resume.experience[0]?.bullets[0] || '';
-
-      const geminiKey = getClientGeminiApiKey();
-      const existingVerbs = (resume.experience || []).flatMap(e => (e.bullets || []).map(b => b.trim().split(/\s+/)[0])).filter(Boolean);
-      const promptKeywords = [...missingKeywords];
-      COMMON_TECH_KEYWORDS.forEach((k) => {
-        if (lower.includes(k.toLowerCase()) && !promptKeywords.includes(k)) {
-          promptKeywords.unshift(k);
-        }
-      });
-
-      const res = await fetch('/api/tailor-bullet', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(geminiKey ? { 'x-gemini-api-key': geminiKey } : {})
-        },
-        body: JSON.stringify({
-          original_bullet: activeBullet,
-          instructions: userText,
-          job_description: targetJob?.description || '',
-          target_role: targetRoleTitle || targetJob?.title || '',
-          keywords: promptKeywords.slice(0, 5),
-          section: currentTarget.section || 'experience',
-          seniority: seniorityLevel,
-          geminiApiKey: geminiKey,
-          candidate_context: resume,
-          existing_verbs: existingVerbs,
-          project_title: currentTarget.section === 'projects' && currentTarget.expIndex !== undefined ? resume.projects?.[currentTarget.expIndex]?.title || '' : '',
-          tech_stack: currentTarget.section === 'projects' && currentTarget.expIndex !== undefined ? (resume.projects?.[currentTarget.expIndex]?.subtitle || '') : '',
-          current_ats_score: atsScore
-        })
-      });
-
-      let tailoredSentence = '';
-      let apiVariants: any[] = [];
-      if (res.ok) {
-        const data = await res.json();
-        tailoredSentence = data.revised_bullet;
-        if (data.variants && data.variants.length > 0) {
-          apiVariants = data.variants;
-        }
+      // Persist resume changes
+      setResume(updated);
+      setResumeVersions((prev) => ({ ...prev, aiBuilt: updated, editable: updated }));
+      setActiveVersionType('AI_BUILT');
+      if (onSaveResume) onSaveResume(updated);
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('atsecure_active_resume', JSON.stringify(updated));
       }
 
-      if (!tailoredSentence || tailoredSentence === activeBullet) {
-        const cleanBullet = activeBullet.replace(/\.$/, '');
-        const firstW = cleanBullet.split(' ')[0] || '';
-        const strongVerb = APPROVED_POWER_VERBS.find(v => v.toLowerCase() !== firstW.toLowerCase()) || 'Engineered';
+      // Recalculate deterministic ATS score
+      const calculatedScore = calculateDeterministicAtsScore(updated, targetJob?.extractedKeywords || []).overallScore;
+      const newScore = Math.min(99, Math.max(atsScore + structuredAction.scoreDelta, calculatedScore));
+      updated.ats_score = newScore;
+      setAtsScore(newScore);
+      if (onScoreUpdate) onScoreUpdate(newScore);
 
-        if (lower.includes('no metrics') || lower.includes('remove numerical') || lower.includes('qualitative') || lower.includes('without numbers') || lower.includes('no numbers')) {
-          tailoredSentence = enforceCanonicalCasing(`${strongVerb} core architectural workflows (${cleanBullet.toLowerCase()}), improving system reliability, maintainability, and code quality.`);
-        } else if (lower.includes('technical') || lower.includes('architecture') || lower.includes('deep dive')) {
-          tailoredSentence = enforceCanonicalCasing(`Architected distributed asynchronous communication patterns for ${cleanBullet.toLowerCase()}, establishing modular service boundaries.`);
-        } else if (lower.includes('metric') || lower.includes('%') || lower.includes('quantif')) {
-          tailoredSentence = enforceCanonicalCasing(`${strongVerb} ${cleanBullet.split(' ').slice(1).join(' ')}, yielding verified throughput gains across production datasets.`);
-        } else if (lower.includes('docker') || lower.includes('cloud') || lower.includes('aws') || lower.includes('kubernetes')) {
-          tailoredSentence = enforceCanonicalCasing(`Deployed microservices architecture utilizing Docker and Kubernetes, ensuring high availability.`);
-        } else if (lower.includes('short') || lower.includes('concise')) {
-          tailoredSentence = enforceCanonicalCasing(`${strongVerb} core backend services, optimizing overall execution throughput.`);
-        } else {
-          tailoredSentence = enforceCanonicalCasing(`${strongVerb} robust technical components (${cleanBullet.toLowerCase()}), strictly aligning with target ATS criteria.`);
-        }
-      }
+      // Flash target section on the left canvas
+      setFlashingSection(structuredAction.targetSection);
+      setTimeout(() => setFlashingSection(null), 3500);
 
-      const suggestionsList: TailorSuggestion[] = apiVariants.length > 0
-        ? apiVariants.map((v, i) => ({
-            id: `sug_custom_${Date.now()}_${i}`,
+      // Generate Google XYZ suggestions if the user was tailoring/improving a bullet
+      let suggestionsList: TailorSuggestion[] | undefined = undefined;
+      if (
+        (structuredAction.intent === 'IMPROVE_RESUME_BULLET' || structuredAction.intent === 'REWRITE_CONTENT' || structuredAction.intent === 'UPDATE_EXPERIENCE' || structuredAction.intent === 'UPDATE_PROJECT') &&
+        structuredAction.suggestedContent
+      ) {
+        suggestionsList = [
+          {
+            id: `sug_custom_${Date.now()}`,
             type: 'google_xyz',
-            title: v.label || (i === 0 ? 'Professional Engineering Version' : i === 1 ? 'Achievement-Focused (Google XYZ)' : i === 2 ? 'ATS-Optimized Version' : 'Job-Specific Version'),
-            approach: v.approach || (i === 0 ? 'Professional' : i === 1 ? 'Achievement-Focused' : i === 2 ? 'ATS-Optimized' : 'Job-Specific'),
-            originalSentence: activeBullet,
-            replacementText: v.text,
-            replacementSentence: v.text,
-            atsGain: v.atsGain || (i === 0 ? 8 : i === 1 ? 8 : i === 2 ? 7 : 8),
-            wordCount: v.wordCount || (v.text ? v.text.split(/\s+/).length : 0),
-            explanation: v.explanation || '',
-            keywordsUsed: v.keywordsUsed || [],
-            improvements: v.improvements || [],
-            needsUserInput: v.needsUserInput || (v.placeholders && v.placeholders.length > 0) || v.text.includes('['),
-            placeholders: v.placeholders || (v.text.includes('[X%]') ? ['[X%]'] : [])
-          }))
-        : [
-            {
-              id: `sug_custom_${Date.now()}`,
-              type: 'google_xyz',
-              title: `Custom Rewrite: ${userText.slice(0, 25)}...`,
-              approach: 'Professional',
-              originalSentence: activeBullet,
-              replacementText: tailoredSentence,
-              replacementSentence: tailoredSentence,
-              atsGain: 8,
-              wordCount: tailoredSentence.split(/\s+/).length,
-              explanation: 'Tailored based on your interactive prompt.',
-              keywordsUsed: promptKeywords.slice(0, 3),
-              improvements: ['Action verb diversified', 'Aligned to target prompt'],
-              needsUserInput: tailoredSentence.includes('['),
-              placeholders: tailoredSentence.includes('[X%]') ? ['[X%]'] : []
-            }
-          ];
-
-      let newScore = atsScore;
-      if (currentTarget && autoApply && tailoredSentence) {
-        const resApply = applySentenceToTarget(tailoredSentence, currentTarget, 8, `AI: ${userText.slice(0, 24)}`);
-        newScore = resApply.newScore;
+            title: `Google XYZ Tailored (${structuredAction.sectionTitle})`,
+            approach: 'Professional',
+            originalSentence: selectedTarget?.contextSentence || '',
+            replacementText: structuredAction.suggestedContent,
+            replacementSentence: structuredAction.suggestedContent,
+            atsGain: structuredAction.scoreDelta || 6,
+            wordCount: structuredAction.suggestedContent.split(/\s+/).length,
+            explanation: structuredAction.explanation,
+            keywordsUsed: targetJob?.extractedKeywords?.slice(0, 3) || [],
+            improvements: ['Zero-hallucination factual preservation', 'Power action verb framing', 'ATS recruiter aligned'],
+            needsUserInput: structuredAction.suggestedContent.includes('['),
+            placeholders: structuredAction.suggestedContent.includes('[X%]') ? ['[X%]'] : []
+          }
+        ];
       }
 
-      const targetLabel = currentTarget.bulletIndex !== undefined
-        ? `Bullet #${currentTarget.bulletIndex + 1}`
-        : 'Active Section';
-
-      const aiResponse = {
-        id: `ai_${Date.now()}`,
-        sender: 'ai' as const,
-        text: autoApply && currentTarget
-          ? `⚡ Auto-Applied to Resume Canvas based on: "${userText}"\n\n✓ Live in Resume: "${tailoredSentence}"\n\n📈 ATS Score upgraded to ${newScore} (+8 pts). You can undo anytime below or continue prompting:`
-          : `🎯 Recognized Intent: Tailor ${targetLabel} according to "${userText}"\n\nReview the truthful Google XYZ rewrites below and click "Apply to Resume":`,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        suggestions: suggestionsList,
-      };
-
-      setChatMessages((prev) => [...prev, aiResponse]);
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          id: `coach_${Date.now()}`,
+          sender: 'ai',
+          text: chatResponseText,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          canUndo: true,
+          undoData: {
+            previousResume: prevSnapshot,
+            description: structuredAction.actionPerformedMessage
+          },
+          structuredAction,
+          suggestions: suggestionsList
+        }
+      ]);
     } catch {
       setChatMessages((prev) => [
         ...prev,
@@ -3721,7 +3762,7 @@ ${resume.education.map((e) => `${e.institution} - ${e.degree} (${e.year})`).join
               </div>
 
               {/* 6. Scholarships & Fellowships */}
-              {resume.scholarships && resume.scholarships.length > 0 && (
+              {resume.scholarships !== undefined && (
                 <div className={`space-y-2 p-3.5 rounded-xl border transition-all ${
                   flashingSection === 'scholarships'
                     ? 'bg-amber-500/10 border-amber-500/50 ring-2 ring-amber-500/40'
@@ -3732,31 +3773,47 @@ ${resume.education.map((e) => `${e.institution} - ${e.degree} (${e.year})`).join
                       <Award className="w-3.5 h-3.5 text-amber-400" />
                       <span>Scholarships & Fellowships</span>
                     </h4>
-                    <span className="text-[10px] text-amber-400 font-mono font-semibold">{resume.scholarships.length} verified</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] text-amber-400 font-mono font-semibold">{resume.scholarships.length} verified</span>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteSection('scholarships')}
+                        className="p-1 text-[var(--text-muted)] hover:text-rose-400 transition-colors cursor-pointer"
+                        title="Delete entire Scholarships section"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
                   </div>
-                  <ul className="space-y-1.5 pl-1 pt-1">
-                    {resume.scholarships.map((item, idx) => (
-                      <li key={idx} className="flex items-start justify-between gap-2 text-xs text-[var(--text-secondary)] group p-1 rounded-lg hover:bg-[var(--card)]">
-                        <div className="flex items-start gap-2 flex-1 cursor-pointer" onClick={() => handleWordClick(item.split(/\s+/)[0] || 'scholarship', item, 'scholarships', 0, idx)}>
-                          <span className="text-amber-400 font-bold mt-0.5">•</span>
-                          <span className="flex-1">{renderInteractiveSentence(item, 'scholarships', 0, idx)}</span>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteCustomItem('scholarships', idx)}
-                          className="opacity-0 group-hover:opacity-100 p-1 text-[var(--text-muted)] hover:text-rose-400 transition-opacity cursor-pointer"
-                          title="Remove item"
-                        >
-                          <Trash2 className="w-3 h-3" />
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
+                  {resume.scholarships.length === 0 ? (
+                    <div className="p-2.5 rounded-lg border border-dashed border-[var(--border)] text-center text-xs text-[var(--text-muted)]">
+                      Scholarships section created. Say &ldquo;I received a scholarship&rdquo; in Career Coach to add!
+                    </div>
+                  ) : (
+                    <ul className="space-y-1.5 pl-1 pt-1">
+                      {resume.scholarships.map((item, idx) => (
+                        <li key={idx} className="flex items-start justify-between gap-2 text-xs text-[var(--text-secondary)] group p-1 rounded-lg hover:bg-[var(--card)]">
+                          <div className="flex items-start gap-2 flex-1 cursor-pointer" onClick={() => handleWordClick(item.split(/\s+/)[0] || 'scholarship', item, 'scholarships', 0, idx)}>
+                            <span className="text-amber-400 font-bold mt-0.5">•</span>
+                            <span className="flex-1">{renderInteractiveSentence(item, 'scholarships', 0, idx)}</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteCustomItem('scholarships', idx)}
+                            className="opacity-0 group-hover:opacity-100 p-1 text-[var(--text-muted)] hover:text-rose-400 transition-opacity cursor-pointer"
+                            title="Remove item"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
               )}
 
               {/* 7. Honors & Awards */}
-              {resume.awards && resume.awards.length > 0 && (
+              {resume.awards !== undefined && (
                 <div className={`space-y-2 p-3.5 rounded-xl border transition-all ${
                   flashingSection === 'awards'
                     ? 'bg-amber-500/10 border-amber-500/50 ring-2 ring-amber-500/40'
@@ -3767,31 +3824,47 @@ ${resume.education.map((e) => `${e.institution} - ${e.degree} (${e.year})`).join
                       <Award className="w-3.5 h-3.5 text-amber-400" />
                       <span>Honors & Awards</span>
                     </h4>
-                    <span className="text-[10px] text-amber-400 font-mono font-semibold">{resume.awards.length} verified</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] text-amber-400 font-mono font-semibold">{resume.awards.length} verified</span>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteSection('awards')}
+                        className="p-1 text-[var(--text-muted)] hover:text-rose-400 transition-colors cursor-pointer"
+                        title="Delete entire Honors & Awards section"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
                   </div>
-                  <ul className="space-y-1.5 pl-1 pt-1">
-                    {resume.awards.map((item, idx) => (
-                      <li key={idx} className="flex items-start justify-between gap-2 text-xs text-[var(--text-secondary)] group p-1 rounded-lg hover:bg-[var(--card)]">
-                        <div className="flex items-start gap-2 flex-1 cursor-pointer" onClick={() => handleWordClick(item.split(/\s+/)[0] || 'award', item, 'awards', 0, idx)}>
-                          <span className="text-amber-400 font-bold mt-0.5">•</span>
-                          <span className="flex-1">{renderInteractiveSentence(item, 'awards', 0, idx)}</span>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteCustomItem('awards', idx)}
-                          className="opacity-0 group-hover:opacity-100 p-1 text-[var(--text-muted)] hover:text-rose-400 transition-opacity cursor-pointer"
-                          title="Remove item"
-                        >
-                          <Trash2 className="w-3 h-3" />
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
+                  {resume.awards.length === 0 ? (
+                    <div className="p-2.5 rounded-lg border border-dashed border-[var(--border)] text-center text-xs text-[var(--text-muted)]">
+                      Honors & Awards section created. Say &ldquo;Add award for hackathon winner&rdquo; to add!
+                    </div>
+                  ) : (
+                    <ul className="space-y-1.5 pl-1 pt-1">
+                      {resume.awards.map((item, idx) => (
+                        <li key={idx} className="flex items-start justify-between gap-2 text-xs text-[var(--text-secondary)] group p-1 rounded-lg hover:bg-[var(--card)]">
+                          <div className="flex items-start gap-2 flex-1 cursor-pointer" onClick={() => handleWordClick(item.split(/\s+/)[0] || 'award', item, 'awards', 0, idx)}>
+                            <span className="text-amber-400 font-bold mt-0.5">•</span>
+                            <span className="flex-1">{renderInteractiveSentence(item, 'awards', 0, idx)}</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteCustomItem('awards', idx)}
+                            className="opacity-0 group-hover:opacity-100 p-1 text-[var(--text-muted)] hover:text-rose-400 transition-opacity cursor-pointer"
+                            title="Remove item"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
               )}
 
               {/* 8. Key Achievements */}
-              {resume.achievements && resume.achievements.length > 0 && (
+              {resume.achievements !== undefined && (
                 <div className={`space-y-2 p-3.5 rounded-xl border transition-all ${
                   flashingSection === 'achievements'
                     ? 'bg-emerald-500/10 border-emerald-500/50 ring-2 ring-emerald-500/40'
@@ -3802,121 +3875,289 @@ ${resume.education.map((e) => `${e.institution} - ${e.degree} (${e.year})`).join
                       <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
                       <span>Key Achievements</span>
                     </h4>
-                    <span className="text-[10px] text-emerald-400 font-mono font-semibold">{resume.achievements.length} verified</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] text-emerald-400 font-mono font-semibold">{resume.achievements.length} verified</span>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteSection('achievements')}
+                        className="p-1 text-[var(--text-muted)] hover:text-rose-400 transition-colors cursor-pointer"
+                        title="Delete entire Achievements section"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
                   </div>
-                  <ul className="space-y-1.5 pl-1 pt-1">
-                    {resume.achievements.map((item, idx) => (
-                      <li key={idx} className="flex items-start justify-between gap-2 text-xs text-[var(--text-secondary)] group p-1 rounded-lg hover:bg-[var(--card)]">
-                        <div className="flex items-start gap-2 flex-1 cursor-pointer" onClick={() => handleWordClick(item.split(/\s+/)[0] || 'achievement', item, 'achievements', 0, idx)}>
-                          <span className="text-emerald-400 font-bold mt-0.5">•</span>
-                          <span className="flex-1">{renderInteractiveSentence(item, 'achievements', 0, idx)}</span>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteCustomItem('achievements', idx)}
-                          className="opacity-0 group-hover:opacity-100 p-1 text-[var(--text-muted)] hover:text-rose-400 transition-opacity cursor-pointer"
-                          title="Remove item"
-                        >
-                          <Trash2 className="w-3 h-3" />
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
+                  {resume.achievements.length === 0 ? (
+                    <div className="p-2.5 rounded-lg border border-dashed border-[var(--border)] text-center text-xs text-[var(--text-muted)]">
+                      Key Achievements section created. Say &ldquo;Got scholarship among 200000+ candidates&rdquo; or &ldquo;Won hackathon&rdquo; to add!
+                    </div>
+                  ) : (
+                    <ul className="space-y-1.5 pl-1 pt-1">
+                      {resume.achievements.map((item, idx) => (
+                        <li key={idx} className="flex items-start justify-between gap-2 text-xs text-[var(--text-secondary)] group p-1 rounded-lg hover:bg-[var(--card)]">
+                          <div className="flex items-start gap-2 flex-1 cursor-pointer" onClick={() => handleWordClick(item.split(/\s+/)[0] || 'achievement', item, 'achievements', 0, idx)}>
+                            <span className="text-emerald-400 font-bold mt-0.5">•</span>
+                            <span className="flex-1">{renderInteractiveSentence(item, 'achievements', 0, idx)}</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteCustomItem('achievements', idx)}
+                            className="opacity-0 group-hover:opacity-100 p-1 text-[var(--text-muted)] hover:text-rose-400 transition-opacity cursor-pointer"
+                            title="Remove item"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
               )}
 
               {/* 9. Licenses & Certifications */}
-              {resume.certifications && resume.certifications.length > 0 && (
+              {resume.certifications !== undefined && (
                 <div className="space-y-2 p-3.5 rounded-xl bg-[var(--surface-alt)]/60 border border-[var(--border)]">
                   <div className="flex items-center justify-between border-b border-[var(--border)] pb-1">
                     <h4 className="text-xs font-bold uppercase tracking-wider text-[var(--text-muted)] flex items-center gap-1.5">
                       <FileCheck className="w-3.5 h-3.5 text-[var(--accent)]" />
                       <span>Licenses & Certifications</span>
                     </h4>
-                    <span className="text-[10px] text-[var(--text-muted)] font-mono">{resume.certifications.length} credentials</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] text-[var(--text-muted)] font-mono">{resume.certifications.length} credentials</span>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteSection('certifications')}
+                        className="p-1 text-[var(--text-muted)] hover:text-rose-400 transition-colors cursor-pointer"
+                        title="Delete entire Certifications section"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
                   </div>
-                  <div className="flex flex-wrap gap-2 pt-1">
-                    {resume.certifications.map((cert, idx) => (
-                      <div key={cert.id || idx} className="group inline-flex items-center gap-2 px-2.5 py-1 rounded-lg bg-[var(--card)] border border-[var(--border)] text-xs text-[var(--text-heading)] shadow-2xs">
-                        <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />
-                        <span className="font-semibold">{cert.name}</span>
-                        {cert.year && <span className="text-[10px] text-[var(--text-muted)] font-mono">({cert.year})</span>}
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setHistory((prev) => [...prev, JSON.parse(JSON.stringify(resume))]);
-                            const updated = JSON.parse(JSON.stringify(resume));
-                            updated.certifications?.splice(idx, 1);
-                            setResume(updated);
-                            if (onSaveResume) onSaveResume(updated);
-                          }}
-                          className="opacity-0 group-hover:opacity-100 p-0.5 text-[var(--text-muted)] hover:text-rose-400 cursor-pointer"
-                        >
-                          <X className="w-2.5 h-2.5" />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
+                  {resume.certifications.length === 0 ? (
+                    <div className="p-2.5 rounded-lg border border-dashed border-[var(--border)] text-center text-xs text-[var(--text-muted)]">
+                      Certifications section created. Say &ldquo;Add certifications section and AWS certification&rdquo; to add!
+                    </div>
+                  ) : (
+                    <div className="flex flex-wrap gap-2 pt-1">
+                      {resume.certifications.map((cert, idx) => (
+                        <div key={cert.id || idx} className="group inline-flex items-center gap-2 px-2.5 py-1 rounded-lg bg-[var(--card)] border border-[var(--border)] text-xs text-[var(--text-heading)] shadow-2xs">
+                          <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />
+                          <span className="font-semibold">{cert.name}</span>
+                          {cert.year && <span className="text-[10px] text-[var(--text-muted)] font-mono">({cert.year})</span>}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setHistory((prev) => [...prev, JSON.parse(JSON.stringify(resume))]);
+                              const updated = JSON.parse(JSON.stringify(resume));
+                              updated.certifications?.splice(idx, 1);
+                              setResume(updated);
+                              if (onSaveResume) onSaveResume(updated);
+                            }}
+                            className="opacity-0 group-hover:opacity-100 p-0.5 text-[var(--text-muted)] hover:text-rose-400 cursor-pointer"
+                          >
+                            <X className="w-2.5 h-2.5" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
 
               {/* 10. Leadership & Extracurricular Activities */}
-              {resume.leadership && resume.leadership.length > 0 && (
+              {resume.leadership !== undefined && (
                 <div className="space-y-2 p-3.5 rounded-xl bg-[var(--surface-alt)]/60 border border-[var(--border)]">
                   <div className="flex items-center justify-between border-b border-[var(--border)] pb-1">
                     <h4 className="text-xs font-bold uppercase tracking-wider text-[var(--text-muted)] flex items-center gap-1.5">
                       <Zap className="w-3.5 h-3.5 text-blue-400" />
                       <span>Leadership & Extracurricular Activities</span>
                     </h4>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteSection('leadership')}
+                      className="p-1 text-[var(--text-muted)] hover:text-rose-400 transition-colors cursor-pointer"
+                      title="Delete Section"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
                   </div>
-                  <ul className="space-y-1.5 pl-1 pt-1">
-                    {resume.leadership.map((item, idx) => (
-                      <li key={idx} className="flex items-start justify-between gap-2 text-xs text-[var(--text-secondary)] group p-1 rounded-lg hover:bg-[var(--card)]">
-                        <div className="flex items-start gap-2 flex-1 cursor-pointer" onClick={() => handleWordClick(item.split(/\s+/)[0] || 'leadership', item, 'leadership', 0, idx)}>
-                          <span className="text-blue-400 font-bold mt-0.5">•</span>
-                          <span className="flex-1">{renderInteractiveSentence(item, 'leadership', 0, idx)}</span>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteCustomItem('leadership', idx)}
-                          className="opacity-0 group-hover:opacity-100 p-1 text-[var(--text-muted)] hover:text-rose-400 transition-opacity cursor-pointer"
-                        >
-                          <Trash2 className="w-3 h-3" />
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
+                  {resume.leadership.length === 0 ? (
+                    <div className="p-2.5 rounded-lg border border-dashed border-[var(--border)] text-center text-xs text-[var(--text-muted)]">
+                      Leadership section created. Type your leadership accomplishments in Career Coach!
+                    </div>
+                  ) : (
+                    <ul className="space-y-1.5 pl-1 pt-1">
+                      {resume.leadership.map((item, idx) => (
+                        <li key={idx} className="flex items-start justify-between gap-2 text-xs text-[var(--text-secondary)] group p-1 rounded-lg hover:bg-[var(--card)]">
+                          <div className="flex items-start gap-2 flex-1 cursor-pointer" onClick={() => handleWordClick(item.split(/\s+/)[0] || 'leadership', item, 'leadership', 0, idx)}>
+                            <span className="text-blue-400 font-bold mt-0.5">•</span>
+                            <span className="flex-1">{renderInteractiveSentence(item, 'leadership', 0, idx)}</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteCustomItem('leadership', idx)}
+                            className="opacity-0 group-hover:opacity-100 p-1 text-[var(--text-muted)] hover:text-rose-400 transition-opacity cursor-pointer"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
               )}
 
               {/* 11. Volunteer Experience */}
-              {resume.volunteer && resume.volunteer.length > 0 && (
+              {resume.volunteer !== undefined && (
                 <div className="space-y-2 p-3.5 rounded-xl bg-[var(--surface-alt)]/60 border border-[var(--border)]">
                   <div className="flex items-center justify-between border-b border-[var(--border)] pb-1">
                     <h4 className="text-xs font-bold uppercase tracking-wider text-[var(--text-muted)] flex items-center gap-1.5">
                       <CheckSquare className="w-3.5 h-3.5 text-emerald-400" />
                       <span>Volunteer Experience</span>
                     </h4>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteSection('volunteer')}
+                      className="p-1 text-[var(--text-muted)] hover:text-rose-400 transition-colors cursor-pointer"
+                      title="Delete Section"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
                   </div>
-                  <ul className="space-y-1.5 pl-1 pt-1">
-                    {resume.volunteer.map((item, idx) => (
-                      <li key={idx} className="flex items-start justify-between gap-2 text-xs text-[var(--text-secondary)] group p-1 rounded-lg hover:bg-[var(--card)]">
-                        <div className="flex items-start gap-2 flex-1 cursor-pointer" onClick={() => handleWordClick(item.split(/\s+/)[0] || 'volunteer', item, 'volunteer', 0, idx)}>
-                          <span className="text-emerald-400 font-bold mt-0.5">•</span>
-                          <span className="flex-1">{renderInteractiveSentence(item, 'volunteer', 0, idx)}</span>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteCustomItem('volunteer', idx)}
-                          className="opacity-0 group-hover:opacity-100 p-1 text-[var(--text-muted)] hover:text-rose-400 transition-opacity cursor-pointer"
-                        >
-                          <Trash2 className="w-3 h-3" />
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
+                  {resume.volunteer.length === 0 ? (
+                    <div className="p-2.5 rounded-lg border border-dashed border-[var(--border)] text-center text-xs text-[var(--text-muted)]">
+                      Volunteer section created. Type your community impact in Career Coach!
+                    </div>
+                  ) : (
+                    <ul className="space-y-1.5 pl-1 pt-1">
+                      {resume.volunteer.map((item, idx) => (
+                        <li key={idx} className="flex items-start justify-between gap-2 text-xs text-[var(--text-secondary)] group p-1 rounded-lg hover:bg-[var(--card)]">
+                          <div className="flex items-start gap-2 flex-1 cursor-pointer" onClick={() => handleWordClick(item.split(/\s+/)[0] || 'volunteer', item, 'volunteer', 0, idx)}>
+                            <span className="text-emerald-400 font-bold mt-0.5">•</span>
+                            <span className="flex-1">{renderInteractiveSentence(item, 'volunteer', 0, idx)}</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteCustomItem('volunteer', idx)}
+                            className="opacity-0 group-hover:opacity-100 p-1 text-[var(--text-muted)] hover:text-rose-400 transition-opacity cursor-pointer"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
               )}
+
+              {/* 11.5 Publications & Research */}
+              {resume.publications !== undefined && (
+                <div className={`space-y-2 p-3.5 rounded-xl border transition-all ${
+                  flashingSection === 'publications'
+                    ? 'bg-blue-500/10 border-blue-500/50 ring-2 ring-blue-500/40'
+                    : 'bg-[var(--surface-alt)]/60 border-[var(--border)]'
+                }`}>
+                  <div className="flex items-center justify-between border-b border-[var(--border)] pb-1">
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-[var(--text-muted)] flex items-center gap-1.5">
+                      <FileText className="w-3.5 h-3.5 text-blue-400" />
+                      <span>Publications & Research</span>
+                    </h4>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] text-blue-400 font-mono font-semibold">{resume.publications.length} items</span>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteSection('publications')}
+                        className="p-1 text-[var(--text-muted)] hover:text-rose-400 transition-colors cursor-pointer"
+                        title="Delete Section"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
+                  </div>
+                  {resume.publications.length === 0 ? (
+                    <div className="p-2.5 rounded-lg border border-dashed border-[var(--border)] text-center text-xs text-[var(--text-muted)]">
+                      Publications section created. Say &ldquo;Add publication on [topic]&rdquo; to add!
+                    </div>
+                  ) : (
+                    <ul className="space-y-1.5 pl-1 pt-1">
+                      {resume.publications.map((item, idx) => {
+                        const pubTitle = typeof item === 'string' ? item : item.title;
+                        return (
+                          <li key={typeof item === 'object' && item.id ? item.id : idx} className="flex items-start justify-between gap-2 text-xs text-[var(--text-secondary)] group p-1 rounded-lg hover:bg-[var(--card)]">
+                            <div className="flex items-start gap-2 flex-1 cursor-pointer" onClick={() => handleWordClick(pubTitle.split(/\s+/)[0] || 'publication', pubTitle, 'publications' as any, 0, idx)}>
+                              <span className="text-blue-400 font-bold mt-0.5">•</span>
+                              <span className="flex-1">{renderInteractiveSentence(pubTitle, 'publications' as any, 0, idx)}</span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteCustomItem('publications', idx)}
+                              className="opacity-0 group-hover:opacity-100 p-1 text-[var(--text-muted)] hover:text-rose-400 transition-opacity cursor-pointer"
+                              title="Remove item"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                </div>
+              )}
+
+              {/* 11.8 Custom Sections */}
+              {resume.customSections && resume.customSections.map((cSec) => (
+                <div
+                  key={cSec.id}
+                  className={`space-y-2 p-3.5 rounded-xl border transition-all ${
+                    flashingSection === cSec.title.toLowerCase() || flashingSection === cSec.id
+                      ? 'bg-purple-500/10 border-purple-500/50 ring-2 ring-purple-500/40'
+                      : 'bg-[var(--surface-alt)]/60 border-[var(--border)]'
+                  }`}
+                >
+                  <div className="flex items-center justify-between border-b border-[var(--border)] pb-1">
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-[var(--text-muted)] flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5 text-purple-400" />
+                      <span>{cSec.title}</span>
+                    </h4>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] text-purple-400 font-mono font-semibold">{cSec.items.length} items</span>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteCustomSection(cSec.id)}
+                        className="p-1 text-[var(--text-muted)] hover:text-rose-400 transition-colors cursor-pointer"
+                        title="Delete Section"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
+                  </div>
+                  {cSec.items.length === 0 ? (
+                    <div className="p-2.5 rounded-lg border border-dashed border-[var(--border)] text-center text-xs text-[var(--text-muted)]">
+                      {cSec.title} section created. Type your content in Career Coach to add!
+                    </div>
+                  ) : (
+                    <ul className="space-y-1.5 pl-1 pt-1">
+                      {cSec.items.map((item, idx) => (
+                        <li key={idx} className="flex items-start justify-between gap-2 text-xs text-[var(--text-secondary)] group p-1 rounded-lg hover:bg-[var(--card)]">
+                          <div className="flex items-start gap-2 flex-1 cursor-pointer" onClick={() => handleWordClick(item.split(/\s+/)[0] || 'custom', item, 'experience', 0, idx)}>
+                            <span className="text-purple-400 font-bold mt-0.5">•</span>
+                            <span className="flex-1">{renderInteractiveSentence(item, 'experience', 0, idx)}</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteCustomSectionItem(cSec.id, idx)}
+                            className="opacity-0 group-hover:opacity-100 p-1 text-[var(--text-muted)] hover:text-rose-400 transition-opacity cursor-pointer"
+                            title="Remove item"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              ))}
 
               {/* 12. Languages */}
               {resume.languages && resume.languages.length > 0 && (
@@ -4089,22 +4330,74 @@ ${resume.education.map((e) => `${e.institution} - ${e.degree} (${e.year})`).join
                   </div>
                   <p className="whitespace-pre-wrap">{msg.text}</p>
 
-                  {/* 1-Click Undo Confirmation Card for Career Coach Additions */}
-                  {msg.canUndo && msg.undoData && (
-                    <div className="mt-3 pt-2.5 border-t border-[var(--border)] flex items-center justify-between gap-2">
-                      <span className="text-[10px] text-emerald-500 dark:text-emerald-400 font-semibold flex items-center gap-1">
-                        <CheckCircle2 className="w-3.5 h-3.5" />
-                        <span>Live on resume canvas</span>
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => handleUndoCareerCoachAction(msg.id, msg.undoData)}
-                        className="px-2.5 py-1 rounded-lg bg-[var(--card)] hover:bg-[var(--card-hover)] border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-heading)] text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs active:scale-95"
-                        title="Revert this addition from the resume canvas"
-                      >
-                        <RotateCcw className="w-3 h-3 text-amber-500" />
-                        <span>↺ Undo Addition</span>
-                      </button>
+                  {/* Action Confirmation & Modification Controls for Career Coach */}
+                  {(msg.structuredAction || (msg.canUndo && msg.undoData)) && (
+                    <div className="mt-3 pt-2.5 border-t border-[var(--border)] space-y-2">
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <span className="text-[10px] text-emerald-500 dark:text-emerald-400 font-semibold flex items-center gap-1">
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          <span>Live on resume canvas</span>
+                        </span>
+                        <div className="flex items-center gap-1.5">
+                          {msg.structuredAction && msg.structuredAction.suggestedContent && editingCoachMessageId !== msg.id && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingCoachMessageId(msg.id);
+                                setEditingCoachContent(msg.structuredAction?.suggestedContent || '');
+                              }}
+                              className="px-2 py-0.8 rounded-lg bg-[var(--surface-alt)] hover:bg-[var(--card)] border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-heading)] text-[10px] font-semibold flex items-center gap-1 transition-colors cursor-pointer"
+                              title="Edit this content before or after applying"
+                            >
+                              <Edit3 className="w-3 h-3 text-[var(--accent)]" />
+                              <span>Edit Content</span>
+                            </button>
+                          )}
+                          {msg.canUndo && msg.undoData && (
+                            <button
+                              type="button"
+                              onClick={() => handleUndoCareerCoachAction(msg.id, msg.undoData)}
+                              className="px-2 py-0.8 rounded-lg bg-[var(--card)] hover:bg-[var(--card-hover)] border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-heading)] text-[10px] font-semibold flex items-center gap-1 transition-colors cursor-pointer shadow-xs active:scale-95"
+                              title="Revert this change from the resume canvas"
+                            >
+                              <RotateCcw className="w-3 h-3 text-amber-500" />
+                              <span>↺ Undo Action</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Inline Content Editor if clicked 'Edit Content' */}
+                      {editingCoachMessageId === msg.id && msg.structuredAction && (
+                        <div className="space-y-2 p-2.5 rounded-xl bg-[var(--surface)] border border-[var(--accent)] mt-1.5">
+                          <span className="text-[9px] font-bold uppercase tracking-wider text-[var(--accent)] block">
+                            Customize Content for {msg.structuredAction.sectionTitle}:
+                          </span>
+                          <textarea
+                            value={editingCoachContent}
+                            onChange={(e) => setEditingCoachContent(e.target.value)}
+                            rows={3}
+                            className="w-full text-xs p-2 rounded-lg bg-[var(--card)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)] leading-relaxed"
+                          />
+                          <div className="flex items-center gap-2 justify-end">
+                            <button
+                              type="button"
+                              onClick={() => setEditingCoachMessageId(null)}
+                              className="px-2.5 py-1 text-[11px] rounded-lg bg-[var(--surface-alt)] hover:bg-[var(--card-hover)] border border-[var(--border)] text-[var(--text-muted)] cursor-pointer"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleSaveEditedCoachContent(msg.id, msg.structuredAction!)}
+                              className="px-3 py-1 text-[11px] rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold cursor-pointer flex items-center gap-1 shadow-xs"
+                            >
+                              <Check className="w-3 h-3" />
+                              <span>Save & Apply</span>
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>

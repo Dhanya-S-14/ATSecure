@@ -70,6 +70,12 @@ export interface TailorAuditChange {
   scoreGain: number;
 }
 
+export interface CustomResumeSection {
+  id: string;
+  title: string;
+  items: string[];
+}
+
 export interface ResumeData {
   id: string;
   userId?: string;
@@ -103,6 +109,7 @@ export interface ResumeData {
   volunteer?: string[];
   languages?: string[];
   unclassified?: string[];
+  customSections?: CustomResumeSection[];
   versionType?: ResumeVersionType;
   extractionStatus?: ExtractionStatus;
   rawExtractedText?: string;
@@ -157,9 +164,46 @@ export interface ATSAnalysisResult {
   matchedKeywords: string[];
 }
 
+export type CoachIntentType =
+  | 'ADD_SECTION'
+  | 'UPDATE_SECTION'
+  | 'DELETE_SECTION'
+  | 'ADD_ACHIEVEMENT'
+  | 'ADD_SKILL'
+  | 'REMOVE_SKILL'
+  | 'UPDATE_SKILL'
+  | 'ADD_PROJECT'
+  | 'UPDATE_PROJECT'
+  | 'ADD_EXPERIENCE'
+  | 'UPDATE_EXPERIENCE'
+  | 'UPDATE_EDUCATION'
+  | 'UPDATE_SUMMARY'
+  | 'REWRITE_CONTENT'
+  | 'IMPROVE_GRAMMAR'
+  | 'IMPROVE_RESUME_BULLET'
+  | 'GENERAL_RESUME_QUERY';
+
+export interface CareerCoachStructuredAction {
+  intent: CoachIntentType;
+  action: 'CREATE_SECTION' | 'CREATE_SECTION_AND_ADD_ITEM' | 'ADD_ITEM' | 'UPDATE_ITEM' | 'REMOVE_ITEM' | 'UPDATE_FIELD' | 'NOOP';
+  targetSection: string;
+  sectionTitle: string;
+  createSectionIfMissing: boolean;
+  originalUserInput: string;
+  suggestedContent: string;
+  title?: string;
+  data?: any;
+  explanation: string;
+  actionPerformedMessage: string;
+  scoreDelta: number;
+  scoreIncreaseString: string;
+  grammarCorrected?: boolean;
+  requiresConfirmation?: boolean;
+}
+
 export interface CareerCoachChangeItem {
   id: string;
-  section: 'summary' | 'experience' | 'projects' | 'skills' | 'certifications' | 'education' | 'achievements' | 'awards' | 'scholarships' | 'leadership' | 'volunteer' | 'languages' | 'publications' | 'unclassified';
+  section: 'summary' | 'experience' | 'projects' | 'skills' | 'certifications' | 'education' | 'achievements' | 'awards' | 'scholarships' | 'leadership' | 'volunteer' | 'languages' | 'publications' | 'unclassified' | string;
   action: 'add' | 'update' | 'remove';
   title?: string;
   originalText?: string;
@@ -176,6 +220,7 @@ export interface ChatMessage {
   text: string;
   timestamp: string;
   intent?: string;
+  structuredAction?: CareerCoachStructuredAction;
   changesApplied?: CareerCoachChangeItem[];
   canUndo?: boolean;
   undoData?: {
