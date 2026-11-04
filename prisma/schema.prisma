@@ -1,0 +1,87 @@
+// JobSync AI Prisma Schema
+
+datasource db {
+  provider = "postgresql" // Or "sqlite" for local dev
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id           String           @id @default(uuid())
+  email        String           @unique
+  name         String
+  avatarUrl    String?          @map("avatar_url")
+  createdAt    DateTime         @default(now()) @map("created_at")
+  updatedAt    DateTime         @updatedAt @map("updated_at")
+  resumes      Resume[]
+  applications JobApplication[]
+  coverLetters CoverLetter[]
+
+  @@map("users")
+}
+
+model Resume {
+  id              String        @id @default(uuid())
+  userId          String        @map("user_id")
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title           String        @default("Untitled Resume")
+  rawContent      Json          @map("raw_content")
+  tailoredContent Json?         @map("tailored_content")
+  atsScore        Int?          @default(0) @map("ats_score")
+  targetJobRole   String?       @map("target_job_role")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+  coverLetters    CoverLetter[]
+
+  @@map("resumes")
+}
+
+enum ApplicationStatus {
+  Draft
+  Applied
+  Interviewing
+  Offer
+  Rejected
+}
+
+model JobApplication {
+  id              String            @id @default(uuid())
+  userId          String            @map("user_id")
+  user            User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company         String
+  role            String
+  location        String?
+  salary          String?
+  jobDescription  String            @map("job_description")
+  status          ApplicationStatus @default(Draft)
+  appliedDate     DateTime          @default(now()) @map("applied_date")
+  atsScore        Int?              @map("ats_score")
+  matchKeywords   String[]          @map("match_keywords")
+  missingKeywords String[]          @map("missing_keywords")
+  notes           String?
+  createdAt       DateTime          @default(now()) @map("created_at")
+  updatedAt       DateTime          @updatedAt @map("updated_at")
+  coverLetters    CoverLetter[]
+
+  @@map("job_applications")
+}
+
+model CoverLetter {
+  id            String          @id @default(uuid())
+  applicationId String?         @map("application_id")
+  application   JobApplication? @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  resumeId      String?         @map("resume_id")
+  resume        Resume?         @relation(fields: [resumeId], references: [id], onDelete: SetNull)
+  userId        String          @map("user_id")
+  user          User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company       String
+  role          String
+  content       String
+  createdAt     DateTime        @default(now()) @map("created_at")
+  updatedAt     DateTime        @updatedAt @map("updated_at")
+
+  @@map("cover_letters")
+}
